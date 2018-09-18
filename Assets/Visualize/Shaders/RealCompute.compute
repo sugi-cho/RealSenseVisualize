@@ -1,0 +1,208 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel init
+#pragma kernel build
+#pragma kernel emitLit
+#pragma kernel addImpact
+#pragma kernel horisonalEffect
+#pragma kernel verticalEffect
+#pragma kernel heightLimitEffect
+
+#include "RealSense.hlsl"
+float time, dt, numP;
+float4 impact;
+bool motionEffect;
+
+[numthreads(8, 1, 1)]
+void init(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    uint idx0 = _IndicesBuffer[idx * 3 + 0];
+    uint idx1 = _IndicesBuffer[idx * 3 + 1];
+    uint idx2 = _IndicesBuffer[idx * 3 + 2];
+    float rnd1 = rand(float2(idx0 * numP, idx1 * numP + 0.5));
+    float rnd2 = rand(float2(idx1 * numP, idx2 * numP + 0.5));
+
+    float3 v0 = _VertBuffer[idx0];
+    float3 v1 = _VertBuffer[idx1];
+    float3 v2 = _VertBuffer[idx2];
+
+    v0.y *= -1;
+    v1.y *= -1;
+    v2.y *= -1;
+
+    float size = abs(v0 - v1) + abs(v1 - v2) + abs(v2 - v0);
+    size *= step(edgeLength(v0, v1, v2), 0.1);
+    float3 normal = float3(0, 0, 1);
+    float3 center = (v0 + v1 + v2) / 3.0;
+
+    p.vert = center;
+    p.vel = 0;
+    p.pos = center;
+    p.dir = normal;
+    p.size = size;
+
+    float t = frac(rnd1 + rnd2 * 0.33) * 60.0;
+    p.t = t % 40.0;
+    p.prop.y = 40.0 < t;
+
+    _ParticleBuffer[idx] = p;
+}
+
+[numthreads(8, 1, 1)]
+void build(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    uint idx0 = _IndicesBuffer[idx * 3 + 0];
+    uint idx1 = _IndicesBuffer[idx * 3 + 1];
+    uint idx2 = _IndicesBuffer[idx * 3 + 2];
+    float rnd = rand(float2(idx0 * numP, idx1 * numP + 0.5));
+
+    float3 v0 = _VertBuffer[idx0];
+    float3 v1 = _VertBuffer[idx1];
+    float3 v2 = _VertBuffer[idx2];
+
+    v0.y *= -1;
+    v1.y *= -1;
+    v2.y *= -1;
+    
+    float size = abs(v0 - v1) + abs(v1 - v2) + abs(v2 - v0);
+    size = lerp(size, p.size, exp(-dt * 10.0));
+    size *= step(edgeLength(v0, v1, v2), 0.1) * saturate(length(v0) * 10);
+    float3 normal = 0 < size ? normalize(cross(v0 - v1 + 0.0001, v2 - v0 + 0.0001)) : float3(0, 0, 1);
+    float3 center = (v0 + v1 + v2) / 3.0;
+    float3 preVert = p.vert;
+    half diff = length(center) - length(preVert);
+
+    float t = p.t + dt;
+    float4 prop = p.prop;
+    bool change = ((1 - prop.y) * (40.0 + rnd * 5.0) + prop.y * 20) < t;
+    t = lerp(t, 0, change);
+
+    prop.x = (0.5 < diff && length(preVert) < 5.0) && motionEffect;
+    prop.y = (prop.y + change) % 2;
+
+    float emitFlag = prop.z;
+    prop.z = prop.y && (prop.x || prop.z);
+    emitFlag = !emitFlag && prop.z;
+    t = lerp(t, 0.0, emitFlag);
+    p.pos = lerp(p.pos, preVert, emitFlag);
+    p.vel = lerp(p.vel, p.dir, emitFlag);
+
+    prop.w = prop.y && prop.w;
+    
+    float3 up = float3(0, 0.02 * pow(max(p.size, 0.001), -0.5), 0) * dt;
+    float3 gravity = float3(0, -1, 0) * dt;
+    float3 curl = dfNoise(p.pos * 2.0) * t * t;
+
+    float3 vel = p.vel * exp(-dt * 10.0) + up * prop.y + gravity * prop.w;
+    vel += change * prop.y * normal;
+    vel = lerp(0, vel, prop.y);
+    float3 pos = p.pos + vel * dt + curl * dt * prop.z;
+    pos = lerp(center, pos, prop.y);
+    float3 dir = rotateAngleAxis(p.dir, float3(0.5, 1, 0), 3 * dt);
+    dir = lerp(normal, dir, prop.y);
+    size = lerp(size, p.size, p.prop.y);
+
+    p.prop = prop;
+    p.vert = center;
+    p.vel = vel;
+    p.pos = pos;
+    p.dir = dir;
+    p.size = size;
+    p.t = t;
+
+    _ParticleBuffer[idx] = p;
+}
+
+float3 effectPos;
+float effectVal;
+
+[numthreads(8, 1, 1)]
+void emitLit(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+
+    uint idx0 = _IndicesBuffer[idx * 3 + 0];
+    uint idx1 = _IndicesBuffer[idx * 3 + 1];
+    uint idx2 = _IndicesBuffer[idx * 3 + 2];
+    float3 rnd = rand3(float2(idx0 * numP + frac(time), idx1 * numP + 0.33 + dt));
+    float r = rand(rnd.zx);
+
+    voxelParticle p = _ParticleBuffer[idx];
+
+    float flag = 5.0 < p.t * p.prop.y && r < effectVal * numP * dt && p.prop.z < 1;
+
+    p.pos = lerp(p.pos, effectPos, flag);
+    p.vel = lerp(p.vel, (rnd - 0.5) * 4, flag);
+    p.t = lerp(p.t, 0.0, flag);
+    p.prop.z = p.prop.z || flag;
+
+    _ParticleBuffer[idx] = p;
+}
+
+[numthreads(8, 1, 1)]
+void addImpact(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    
+    float3 fromTo = p.pos - effectPos;
+    float d = length(fromTo);
+    float impact = max(0.0, effectVal - d);
+    p.prop.w = 0 < impact;
+    p.vel += normalize(fromTo) * impact * impact * 32;
+    p.prop.y = p.prop.w || p.prop.y;
+    p.t = (p.prop.y < 1 && p.prop.w) ? 0 : p.t;
+
+    _ParticleBuffer[idx] = p;
+}
+
+[numthreads(8, 1, 1)]
+void horisonalEffect(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    
+    bool flag = frac(p.pos.y * 10) < 0.25 && p.prop.y < 1;
+    p.t = lerp(p.t, 0, flag);
+    p.prop.y = flag || p.prop.y;
+    p.prop.z = flag || p.prop.z;
+
+    p.t = (p.prop.y < 1 && p.prop.w) ? 0 : p.t;
+
+    _ParticleBuffer[idx] = p;
+}
+
+[numthreads(8, 1, 1)]
+void verticalEffect(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    
+    bool flag = frac(p.pos.x * 10) < 0.25 && p.prop.y < 1;
+    p.t = lerp(p.t, 0, flag);
+    p.prop.y = flag || p.prop.y;
+    p.prop.z = flag || p.prop.z;
+
+    p.t = (p.prop.y < 1 && p.prop.w) ? 0 : p.t;
+
+    _ParticleBuffer[idx] = p;
+}
+
+[numthreads(8, 1, 1)]
+void heightLimitEffect(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    voxelParticle p = _ParticleBuffer[idx];
+    
+    bool flag = p.pos.y < effectVal && p.prop.y < 1;
+    p.t = lerp(p.t, 0, flag);
+    p.prop.y = flag || p.prop.y;
+    p.prop.z = flag || p.prop.z;
+
+    p.t = (p.prop.y < 1 && p.prop.w) ? 0 : p.t;
+
+    _ParticleBuffer[idx] = p;
+}
