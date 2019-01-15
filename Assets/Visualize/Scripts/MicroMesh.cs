@@ -30,8 +30,8 @@ public class MicroMesh : RendererBehaviour
     // Use this for initialization
     void Start()
     {
-        RealSenseDevice.Instance.OnStart += OnStartStreaming;
-        RealSenseDevice.Instance.OnStop += OnStopStreaming;
+        RsDevice.Instance.OnStart += OnStartStreaming;
+        RsDevice.Instance.OnStop += OnStopStreaming;
     }
 
     private void OnStartStreaming(PipelineProfile activeProfile)
@@ -97,7 +97,7 @@ public class MicroMesh : RendererBehaviour
             GetComponent<MeshFilter>().sharedMesh = mesh;
         }
 
-        RealSenseDevice.Instance.onNewSampleSet += OnFrames;
+        RsDevice.Instance.onNewSampleSet += OnFrames;
     }
 
     void OnDestroy()
