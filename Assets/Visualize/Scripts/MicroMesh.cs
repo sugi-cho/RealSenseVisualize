@@ -26,12 +26,13 @@ public class MicroMesh : RendererBehaviour
     PointCloud pc;
 
     ComputeBuffer vertexBuffer;
+    public RsDevice devise;
 
     // Use this for initialization
     void Start()
     {
-        RsDevice.Instance.OnStart += OnStartStreaming;
-        RsDevice.Instance.OnStop += OnStopStreaming;
+        devise.OnStart += OnStartStreaming;
+        devise.OnStop += OnStopStreaming;
     }
 
     private void OnStartStreaming(PipelineProfile activeProfile)
@@ -97,7 +98,7 @@ public class MicroMesh : RendererBehaviour
             GetComponent<MeshFilter>().sharedMesh = mesh;
         }
 
-        RsDevice.Instance.onNewSampleSet += OnFrames;
+        devise.OnNewSample += OnNewSample;
     }
 
     void OnDestroy()
@@ -132,17 +133,37 @@ public class MicroMesh : RendererBehaviour
         }
     }
 
-    private void OnFrames(FrameSet frames)
+    void OnNewSample(Frame frame)
     {
-        using (var depthFrame = frames.DepthFrame)
-        using (var points = pc.Calculate(depthFrame))
-        using (var f = frames.FirstOrDefault<VideoFrame>(stream))
+        try
         {
-            pc.MapTexture(f);
-            memcpy(verticesPtr, points.VertexData, points.Count * 3 * sizeof(float));
-
-            e.Set();
+            if (frame.IsComposite)
+            {
+                using (var fs = FrameSet.FromFrame(frame))
+                using (var points = TryGetPoints(fs))
+                {
+                    memcpy(verticesPtr, points.VertexData, points.Count * 3 * sizeof(float));
+                    e.Set();
+                }
+            }
+            if (frame is Points)
+            {
+                var points = (Points)frame;
+                memcpy(verticesPtr, points.VertexData, points.Count * 3 * sizeof(float));
+                e.Set();
+            }
         }
+        catch { }
+    }
+    private Points TryGetPoints(FrameSet frameset)
+    {
+        foreach (var f in frameset)
+        {
+            if (f is Points)
+                return f as Points;
+            f.Dispose();
+        }
+        return null;
     }
 
     void Update()

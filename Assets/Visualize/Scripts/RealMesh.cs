@@ -15,6 +15,7 @@ using sugi.cc;
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class RealMesh : RendererBehaviour
 {
+    public RsDevice device;
     public Stream stream = Stream.Color;
     Mesh mesh;
 
@@ -108,8 +109,8 @@ public class RealMesh : RendererBehaviour
 
     void Start()
     {
-        RealSenseDevice.Instance.OnStart += OnStartStreaming;
-        RealSenseDevice.Instance.OnStop += OnStopStreaming;
+        device.OnStart += OnStartStreaming;
+        device.OnStop += OnStopStreaming;
     }
 
     private void OnStartStreaming(PipelineProfile activeProfile)
@@ -189,7 +190,7 @@ public class RealMesh : RendererBehaviour
             GetComponent<MeshFilter>().sharedMesh = mesh;
         }
 
-        RealSenseDevice.Instance.onNewSampleSet += OnFrames;
+        device.OnNewSample += OnNewSample;
     }
 
     void OnDestroy()
@@ -226,11 +227,7 @@ public class RealMesh : RendererBehaviour
 
     private void OnFrames(FrameSet frames)
     {
-        using (var depthFrame =
-                holeFilling.ApplyFilter(
-                //temporal.ApplyFilter(
-                //spatial.ApplyFilter(
-                frames.DepthFrame))//))
+        using (var depthFrame = frames.DepthFrame)
         using (var points = pc.Calculate(depthFrame))
         using (var f = frames.FirstOrDefault<VideoFrame>(stream))
         {
@@ -239,6 +236,11 @@ public class RealMesh : RendererBehaviour
 
             e.Set();
         }
+    }
+
+    void OnNewSample(Frame frame)
+    {
+
     }
 
     void Update()
