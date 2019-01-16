@@ -15,17 +15,13 @@ using sugi.cc;
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class RealMesh : RendererBehaviour
 {
-    public Stream stream = Stream.Color;
+    public RsFrameProvider source;
     Mesh mesh;
-
-    PointCloud pc;
 
     private GCHandle handle;
     private IntPtr verticesPtr;
 
     public bool pause;
-
-    readonly AutoResetEvent e = new AutoResetEvent(false);
 
     public ComputeShader compute;
     Vector3[] vertices;
@@ -33,15 +29,12 @@ public class RealMesh : RendererBehaviour
     ComputeBuffer vertexBuffer;
     ComputeBuffer indicesBuffer;
 
-
-    SpatialFilter spatial;
-    TemporalFilter temporal;
-    HoleFillingFilter holeFilling;
-
     int numParticles;
     public float particleEmitRate = 0.01f;
     public float impactRadius = 0.25f;
     bool motionParticle;
+
+    FrameQueue q;
 
     public void SetMotionParticle()
     {
@@ -108,47 +101,36 @@ public class RealMesh : RendererBehaviour
 
     void Start()
     {
-        RealSenseDevice.Instance.OnStart += OnStartStreaming;
-        RealSenseDevice.Instance.OnStop += OnStopStreaming;
+        source.OnStart += OnStartStreaming;
+        source.OnStop += OnStopStreaming;
     }
 
-    private void OnStartStreaming(PipelineProfile activeProfile)
+    private void OnStartStreaming(PipelineProfile obj)
     {
-        pc = new PointCloud();
-        spatial = new SpatialFilter();
-        temporal = new TemporalFilter();
-        holeFilling = new HoleFillingFilter();
+        q = new FrameQueue(1);
 
-        using (var profile = activeProfile.GetStream(stream))
-        {
-            if (profile == null)
-            {
-                Debug.LogWarningFormat("Stream {0} not in active profile", stream);
-            }
-        }
-
-        using (var profile = activeProfile.GetStream(Stream.Depth) as VideoStreamProfile)
+        using (var depth = obj.GetStream(Stream.Depth) as VideoStreamProfile)
         {
             Assert.IsTrue(SystemInfo.SupportsTextureFormat(TextureFormat.RGFloat));
 
 
-            numParticles = (profile.Width - 1) * (profile.Height - 1) * 2;
+            numParticles = (depth.Width - 1) * (depth.Height - 1) * 2;
 
-            vertices = new Vector3[profile.Width * profile.Height];
+            vertices = new Vector3[depth.Width * depth.Height];
             handle = GCHandle.Alloc(vertices, GCHandleType.Pinned);
             verticesPtr = handle.AddrOfPinnedObject();
 
-            var indices = new int[(profile.Width - 1) * (profile.Height - 1) * 6];
+            var indices = new int[(depth.Width - 1) * (depth.Height - 1) * 6];
 
             var iIdx = 0;
-            for (int j = 0; j < profile.Height; j++)
+            for (int j = 0; j < depth.Height; j++)
             {
-                for (int i = 0; i < profile.Width; i++)
+                for (int i = 0; i < depth.Width; i++)
                 {
-                    if (i < profile.Width - 1 && j < profile.Height - 1)
+                    if (i < depth.Width - 1 && j < depth.Height - 1)
                     {
-                        var idx = i + j * profile.Width;
-                        var y = profile.Width;
+                        var idx = i + j * depth.Width;
+                        var y = depth.Width;
                         indices[iIdx++] = idx + 0;
                         indices[iIdx++] = idx + y;
                         indices[iIdx++] = idx + 1;
@@ -189,7 +171,7 @@ public class RealMesh : RendererBehaviour
             GetComponent<MeshFilter>().sharedMesh = mesh;
         }
 
-        RealSenseDevice.Instance.onNewSampleSet += OnFrames;
+        source.OnNewSample += OnNewSample;
     }
 
     void OnDestroy()
@@ -210,45 +192,69 @@ public class RealMesh : RendererBehaviour
 
     private void OnStopStreaming()
     {
-        // RealSenseDevice.Instance.onNewSampleSet -= OnFrames;
-
-        e.Reset();
+        source.OnNewSample -= OnNewSample;
+        if (q != null)
+        {
+            q.Dispose();
+            q = null;
+        }
 
         if (handle.IsAllocated)
             handle.Free();
-
-        if (pc != null)
-        {
-            pc.Dispose();
-            pc = null;
-        }
     }
 
-    private void OnFrames(FrameSet frames)
+    void OnNewSample(Frame frame)
     {
-        using (var depthFrame =
-                holeFilling.ApplyFilter(
-                //temporal.ApplyFilter(
-                //spatial.ApplyFilter(
-                frames.DepthFrame))//))
-        using (var points = pc.Calculate(depthFrame))
-        using (var f = frames.FirstOrDefault<VideoFrame>(stream))
+        try
         {
-            pc.MapTexture(f);
-            memcpy(verticesPtr, points.VertexData, points.Count * 3 * sizeof(float));
-
-            e.Set();
+            if (frame.IsComposite)
+            {
+                using (var fs = FrameSet.FromFrame(frame))
+                using (var points = TryGetPoints(fs))
+                {
+                    q.Enqueue(points);
+                }
+            }
+            if (frame is Points)
+            {
+                q.Enqueue(frame);
+            }
         }
+        catch (Exception e)
+        {
+            Debug.LogException(e);
+        }
+    }
+    private Points TryGetPoints(FrameSet frameset)
+    {
+        foreach (var f in frameset)
+        {
+            if (f is Points)
+                return f as Points;
+            f.Dispose();
+        }
+        return null;
     }
 
     void Update()
     {
         if (pause)
             return;
-        if (e.WaitOne(0))
+        if (q != null)
         {
-            vertexBuffer.SetData(vertices);
+            Frame f;
+            if (!q.PollForFrame(out f))
+                return;
 
+            using (var points = f as Points)
+            {
+                var s = points.Count * sizeof(float);
+                if (points.VertexData != IntPtr.Zero)
+                {
+                    memcpy(verticesPtr, points.VertexData, s * 3);
+                    vertexBuffer.SetData(vertices);
+                }
+            }
             var kernel = compute.FindKernel("build");
             compute.SetBuffer(kernel, "_ParticleBuffer", particleBuffer);
             compute.SetBuffer(kernel, "_VertBuffer", vertexBuffer);

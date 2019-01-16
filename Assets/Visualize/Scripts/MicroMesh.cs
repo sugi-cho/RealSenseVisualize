@@ -13,91 +13,89 @@ using sugi.cc;
 
 public class MicroMesh : RendererBehaviour
 {
-    public Stream stream = Stream.Depth;
+    public RsFrameProvider source;
     Mesh mesh;
+    Texture2D uvmap;
 
     Vector3[] vertices;
 
     private GCHandle handle;
     private IntPtr verticesPtr;
 
-    readonly AutoResetEvent e = new AutoResetEvent(false);
-
-    PointCloud pc;
-
     ComputeBuffer vertexBuffer;
+    FrameQueue q;
 
     // Use this for initialization
     void Start()
     {
-        RealSenseDevice.Instance.OnStart += OnStartStreaming;
-        RealSenseDevice.Instance.OnStop += OnStopStreaming;
+        source.OnStart += OnStartStreaming;
+        source.OnStop += OnStopStreaming;
     }
 
-    private void OnStartStreaming(PipelineProfile activeProfile)
+    private void OnStartStreaming(PipelineProfile obj)
     {
-        pc = new PointCloud();
+        q = new FrameQueue(1);
 
-        using (var profile = activeProfile.GetStream(stream))
+        using (var depth = obj.Streams.FirstOrDefault(s => s.Stream == Stream.Depth) as VideoStreamProfile)
+            ResetMesh(depth.Width, depth.Height);
+
+        source.OnNewSample += OnNewSample;
+    }
+
+    void ResetMesh(int width, int height)
+    {
+        Assert.IsTrue(SystemInfo.SupportsTextureFormat(TextureFormat.RGFloat));
+        uvmap = new Texture2D(width, height, TextureFormat.RGFloat, false, true)
         {
-            if (profile == null)
-            {
-                Debug.LogWarningFormat("Stream {0} not in active profile", stream);
-            }
-        }
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Point,
+        };
 
-        using (var profile = activeProfile.GetStream(Stream.Depth) as VideoStreamProfile)
+        vertices = new Vector3[width * height];
+        handle = GCHandle.Alloc(vertices, GCHandleType.Pinned);
+        verticesPtr = handle.AddrOfPinnedObject();
+
+        var indices = new int[(width - 1) * (height - 1) * 6];
+
+        var iIdx = 0;
+        for (int j = 0; j < height; j++)
         {
-            Assert.IsTrue(SystemInfo.SupportsTextureFormat(TextureFormat.RGFloat));
-
-            vertices = new Vector3[profile.Width * profile.Height];
-            handle = GCHandle.Alloc(vertices, GCHandleType.Pinned);
-            verticesPtr = handle.AddrOfPinnedObject();
-
-            var indices = new int[(profile.Width - 1) * (profile.Height - 1) * 6];
-
-            var iIdx = 0;
-            for (int j = 0; j < profile.Height; j++)
+            for (int i = 0; i < width; i++)
             {
-                for (int i = 0; i < profile.Width; i++)
+                if (i < width - 1 && j < height - 1)
                 {
-                    if (i < profile.Width - 1 && j < profile.Height - 1)
-                    {
-                        var idx = i + j * profile.Width;
-                        var y = profile.Width;
-                        indices[iIdx++] = idx + 0;
-                        indices[iIdx++] = idx + 1;
-                        indices[iIdx++] = idx + y;
+                    var idx = i + j * width;
+                    var y = width;
+                    indices[iIdx++] = idx + 0;
+                    indices[iIdx++] = idx + 1;
+                    indices[iIdx++] = idx + y;
 
-                        indices[iIdx++] = idx + 1;
-                        indices[iIdx++] = idx + y + 1;
-                        indices[iIdx++] = idx + y;
-                    }
+                    indices[iIdx++] = idx + 1;
+                    indices[iIdx++] = idx + y + 1;
+                    indices[iIdx++] = idx + y;
                 }
             }
-
-            vertexBuffer = new ComputeBuffer(vertices.Length, sizeof(float) * 3);
-
-            vertexBuffer.SetData(vertices);
-            renderer.SetBuffer("_Vertex", vertexBuffer);
-
-            if (mesh != null)
-                Destroy(mesh);
-
-            mesh = new Mesh()
-            {
-                indexFormat = IndexFormat.UInt32,
-            };
-            mesh.MarkDynamic();
-
-            mesh.vertices = vertices;
-            mesh.SetIndices(indices, MeshTopology.Triangles, 0, false);
-            mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 10f);
-
-            GetComponent<MeshFilter>().sharedMesh = mesh;
         }
 
-        RealSenseDevice.Instance.onNewSampleSet += OnFrames;
+        vertexBuffer = new ComputeBuffer(vertices.Length, sizeof(float) * 3);
+
+        vertexBuffer.SetData(vertices);
+        renderer.SetBuffer("_Vertex", vertexBuffer);
+
+        if (mesh != null)
+            Destroy(mesh);
+
+        mesh = new Mesh()
+        {
+            indexFormat = IndexFormat.UInt32,
+        };
+        mesh.MarkDynamic();
+
+        mesh.vertices = vertices;
+        mesh.SetIndices(indices, MeshTopology.Triangles, 0, false);
+        mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 10f);
+
+        GetComponent<MeshFilter>().sharedMesh = mesh;
     }
 
     void OnDestroy()
@@ -118,37 +116,74 @@ public class MicroMesh : RendererBehaviour
 
     private void OnStopStreaming()
     {
-        // RealSenseDevice.Instance.onNewSampleSet -= OnFrames;
+        source.OnNewSample -= OnNewSample;
 
-        e.Reset();
+        if (q != null)
+        {
+            q.Dispose();
+            q = null;
+        }
 
         if (handle.IsAllocated)
             handle.Free();
-
-        if (pc != null)
-        {
-            pc.Dispose();
-            pc = null;
-        }
     }
 
-    private void OnFrames(FrameSet frames)
+    void OnNewSample(Frame frame)
     {
-        using (var depthFrame = frames.DepthFrame)
-        using (var points = pc.Calculate(depthFrame))
-        using (var f = frames.FirstOrDefault<VideoFrame>(stream))
+        try
         {
-            pc.MapTexture(f);
-            memcpy(verticesPtr, points.VertexData, points.Count * 3 * sizeof(float));
-
-            e.Set();
+            if (frame.IsComposite)
+            {
+                using (var fs = FrameSet.FromFrame(frame))
+                using (var points = TryGetPoints(fs))
+                {
+                    q.Enqueue(points);
+                }
+            }
+            if (frame is Points)
+            {
+                q.Enqueue(frame);
+            }
         }
+        catch (Exception e)
+        {
+            Debug.LogException(e);
+        }
+    }
+    private Points TryGetPoints(FrameSet frameset)
+    {
+        foreach (var f in frameset)
+        {
+            if (f is Points)
+                return f as Points;
+            f.Dispose();
+        }
+        return null;
     }
 
     void Update()
     {
-        if (e.WaitOne(0))
-            vertexBuffer.SetData(vertices);
+        if (q != null)
+        {
+            Frame f;
+            if (!q.PollForFrame(out f))
+                return;
+
+            using (var points = f as Points)
+            {
+                var s = points.Count * sizeof(float);
+                if (points.TextureData != IntPtr.Zero)
+                {
+                    uvmap.LoadRawTextureData(points.TextureData, s * 2);
+                    uvmap.Apply();
+                }
+                if (points.VertexData != IntPtr.Zero)
+                {
+                    memcpy(verticesPtr, points.VertexData, s * 3);
+                    vertexBuffer.SetData(vertices);
+                }
+            }
+        }
     }
 
     [DllImport("msvcrt.dll", EntryPoint = "memcpy", CallingConvention = CallingConvention.Cdecl, SetLastError = false)]
