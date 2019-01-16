@@ -1,0 +1,9 @@
+diff a/Assets/Visualize/Scripts/RealMesh.cs b/Assets/Visualize/Scripts/RealMesh.cs	(rejected hunks)
+@@ -203,7 +203,6 @@
+         if (handle.IsAllocated)
+             handle.Free();
+ 
+-        {
+     }
+ 
+     void OnNewSample(Frame frame)

@@ -10,11 +10,12 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 475d71c97716db644863efe7bddfbd70, type: 3}
-  m_Name: BackgroundSegmentation
+  m_Name: PointCloud
   m_EditorClassIdentifier: 
   _processingBlocks:
-  - {fileID: 114988252412256958}
---- !u!114 &114988252412256958
+  - {fileID: 0}
+  - {fileID: 114118848706240246}
+--- !u!114 &114118848706240246
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -23,8 +24,10 @@ MonoBehaviour:
   m_GameObject: {fileID: 0}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3f321dd38a2028949a3ecd8e2905bb5f, type: 3}
-  m_Name: RsAlign
+  m_Script: {fileID: 11500000, guid: 949c0815228b7334a89a9b09ff0c7fdb, type: 3}
+  m_Name: RsPointCloud
   m_EditorClassIdentifier: 
   enabled: 1
-  _alignTo: 2
+  TextureStream: 1
+  TextureFormat: 5
+  _occlusionRemoval: 0
